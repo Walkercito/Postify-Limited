@@ -1,88 +1,80 @@
-# automatizacion-facebook
+# Postify-Limited
 
-A Telegram bot built with **Pyrogram** (`kurigram` fork), **SQLAlchemy 2.0**
-(async + SQLite), **Pydantic** / **pydantic-settings**, and **structlog**.
-Managed with **uv**; linted/formatted with **ruff**; type-checked with **ty**.
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+[![uv](https://img.shields.io/badge/managed%20by-uv-de5fe9.svg)](https://docs.astral.sh/uv/)
+[![Ruff](https://img.shields.io/badge/lint-ruff-d7ff64.svg)](https://docs.astral.sh/ruff/)
+[![ty](https://img.shields.io/badge/types-ty-261230.svg)](https://github.com/astral-sh/ty)
+[![Telegram](https://img.shields.io/badge/Telegram-Pyrogram-26A5E4.svg)](https://docs.pyrogram.org/)
+
+A **private** Telegram bot that publishes a post to many Facebook groups in one
+run. A single admin keeps a whitelist of users, links each one to a captured
+Facebook session, and the bot fans the post out — paced and jittered — reporting
+a paginated, per-group result when it finishes.
+
+> ⚠️ The Facebook engine drives the unofficial web/Graph surface and violates
+> Facebook's ToS. Use throwaway accounts only.
+
+## Stack
+
+**Pyrogram** (`kurigram` fork, MTProto) · **SQLAlchemy 2.0** async + SQLite ·
+**Pydantic v2** / pydantic-settings · **structlog** wide-event logging ·
+**uv** · **ruff** · **ty**.
+
+## Features
+
+- 🔐 One admin, a whitelist of users (request → grant / deny / revoke).
+- 📎 Per-user Facebook session linking (stores only `uid` + token, never the password).
+- 📤 Multi-group publishing with pacing, jitter, batch cool-downs, and self-healing photo reuse.
+- 📄 Paginated, no-truncation result summary across every target group.
 
 ## Requirements
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
 
-## Setup
+## Install
 
 ```bash
-uv sync                 # create the venv and install everything
-cp .env.example .env    # then fill in your Telegram credentials
+git clone git@github.com:Walkercito/Postify-Limited.git
+cd Postify-Limited
+
+uv sync                      # create the venv + install everything
+cp .env.example .env         # then fill in your Telegram credentials
+uv run pre-commit install    # one-time: install the commit gate
 ```
 
 Get `api_id` / `api_hash` from <https://my.telegram.org> and a bot token from
-[@BotFather](https://t.me/BotFather).
+[@BotFather](https://t.me/BotFather); set your numeric `TELEGRAM__ADMIN_ID`.
 
 ## Run
 
 ```bash
-uv run bot              # or: uv run python -m bot
+uv run bot                   # or: uv run python -m bot
 ```
 
-## Facebook account provisioning
+## Linking a Facebook account
 
-The bot posts on a user's behalf with a captured Facebook **session**. Capture
-it on a device Facebook already trusts (sidesteps checkpoint challenges), then
-hand the file to the admin:
+Capture a session on a device Facebook already trusts (sidesteps checkpoints),
+then hand the file to the admin:
 
 ```bash
-uv run python scripts/fb_capture_session.py   # prompts for email + password
-# writes ./session.json
+uv run python scripts/fb_capture_session.py            # email + password → ./session.json
+uv run python scripts/fb_capture_session.py --access-token   # bring your own EAAB… token
 ```
 
-If Facebook challenges the login (an account-verification checkpoint or a "Was
-this you?" approval), the script **pauses**: clear it at
-<https://www.facebook.com>, then press Enter to retry. The device id is saved to
-`.fb_machine_id` and reused every run, so once a checkpoint is cleared the trust
-sticks (a fresh id each run would just re-trigger it). A 2FA code, if required,
-is prompted inline.
-
-If the login is permanently checkpoint-blocked, **bring your own token** instead
-— supply an `EAAB…` access token captured from an already-authenticated session
-(e.g. by intercepting the Facebook app's Graph traffic):
-
-```bash
-uv run python scripts/fb_capture_session.py --access-token   # prompts (not echoed)
-# or pass it directly: --access-token EAAB...  (lands in shell history)
-```
-
-The script verifies the token against the Graph API, derives the `uid` (override
-with `--uid`), and writes the same `session.json` — no email/password or login.
-
-The admin opens the bot's **Facebook** screen, taps *Link* for a user, and
-sends `session.json` as a document. Only the account uid and access token are
-stored — never the password. **`session.json` holds a live token: delete it
-once uploaded** (it's gitignored). The Facebook engine violates Facebook's ToS,
-so use throwaway accounts only.
+If the login is challenged, the script pauses so you can clear it in a browser,
+then retries (the device id is reused via `.fb_machine_id` so the trust sticks).
+In the bot's **Facebook** screen the admin taps *Link* for a user and uploads
+`session.json` as a document. **`session.json` holds a live token — delete it
+after uploading** (it's gitignored).
 
 ## Development
 
 ```bash
-uv run ruff format .            # format
-uv run ruff check --fix .       # lint (autofix)
-uv run ty check                 # type-check
-uv run pytest                   # tests
+uv run ruff format src tests scripts    # format
+uv run ruff check --fix src tests scripts   # lint (autofix)
+uv run ty check                         # type-check
+uv run pytest                           # tests
 ```
 
-## Layout
-
-```
-src/bot/
-├── app.py            # BotApplication + entry point
-├── constants.py      # enums & constants (no magic values)
-├── core/             # config, logging, Pyrogram client
-├── db/               # engine/session, declarative base, models
-├── schemas/          # Pydantic DTOs
-├── repositories/     # data-access layer
-├── services/         # business logic
-└── handlers/         # Pyrogram routers + per-update logging
-scripts/              # standalone CLIs (e.g. fb_capture_session.py)
-```
-
-See `CLAUDE.md` for architecture and conventions.
+See [`CLAUDE.md`](CLAUDE.md) for the full architecture and conventions.
