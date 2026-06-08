@@ -1,0 +1,6 @@
+{
+  "name": "python-lsp",
+  "description": "Provides the ty (Astral) language server so Claude gets real-time Python diagnostics, go-to-definition, hover and find-references.",
+  "version": "0.1.0",
+  "lspServers": "./.lsp.json"
+}

@@ -1,0 +1,9 @@
+{
+  "ty": {
+    "command": "${CLAUDE_PROJECT_DIR}/.venv/bin/ty",
+    "args": ["server"],
+    "extensionToLanguage": {
+      ".py": "python"
+    }
+  }
+}

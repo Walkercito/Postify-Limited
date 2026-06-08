@@ -1,0 +1,13 @@
+{
+  "name": "local-tooling",
+  "owner": {
+    "name": "automatizacion-facebook"
+  },
+  "plugins": [
+    {
+      "name": "python-lsp",
+      "source": "./plugins/python-lsp",
+      "description": "ty (Astral) language server for Python code intelligence"
+    }
+  ]
+}

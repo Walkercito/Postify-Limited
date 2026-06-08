@@ -1,0 +1,38 @@
+# Pre-commit gate. Every hook runs through `uv run` so the tool versions come
+# from this project's dev dependency group (single source of truth — no second
+# place to bump versions). Install once with: uv run pre-commit install
+minimum_pre_commit_version: "4.0.0"
+fail_fast: false
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ty
+        name: ty type check
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+      - id: pylint-dry
+        name: pylint duplicate-code (DRY)
+        entry: uv run pylint --disable=all --enable=duplicate-code src/bot
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true

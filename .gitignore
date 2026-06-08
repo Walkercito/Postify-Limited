@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+# (uv.lock IS committed; the cache is not)
+.uv/
+
+# Type checkers / linters / test caches
+.mypy_cache/
+.ruff_cache/
+.ty_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+# Captured Facebook session handed to the bot (holds a live token)
+session.json
+# Persisted device id the capture script reuses to stay Facebook-trusted
+.fb_machine_id
+
+# Pyrogram session files
+*.session
+*.session-journal
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+data/*.db*
+
+# Logs
+*.log
+logs/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Claude Code (shared config IS committed; personal overrides are not)
+.claude/settings.local.json
