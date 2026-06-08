@@ -5,6 +5,7 @@
 [![Ruff](https://img.shields.io/badge/lint-ruff-d7ff64.svg)](https://docs.astral.sh/ruff/)
 [![ty](https://img.shields.io/badge/types-ty-261230.svg)](https://github.com/astral-sh/ty)
 [![Telegram](https://img.shields.io/badge/Telegram-Pyrogram-26A5E4.svg)](https://docs.pyrogram.org/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 A **private** Telegram bot that publishes a post to many Facebook groups in one
 run. A single admin keeps a whitelist of users, links each one to a captured
@@ -78,3 +79,7 @@ uv run pytest                           # tests
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the full architecture and conventions.
+
+## License
+
+[Apache License 2.0](LICENSE).

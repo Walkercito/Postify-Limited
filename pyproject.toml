@@ -1,9 +1,11 @@
 [project]
-name = "automatizacion-facebook"
+name = "postify-limited"
 version = "0.1.0"
-description = "Telegram bot built with Pyrogram, SQLAlchemy and Pydantic."
+description = "Private Telegram bot that publishes a post to many Facebook groups."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
     "kurigram>=2.2.23",
     "sqlalchemy[asyncio]>=2.0.50,<2.1",
