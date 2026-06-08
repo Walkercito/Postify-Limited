@@ -440,7 +440,7 @@ dependencies = [
     { name = "rich" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
-    { name = "tgcrypto2" },
+    { name = "tgcrypto2", marker = "platform_machine != 'aarch64'" },
 ]
 
 [package.dev-dependencies]
@@ -465,7 +465,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50,<2.1" },
     { name = "structlog", specifier = ">=26.1,<27" },
-    { name = "tgcrypto2", specifier = ">=1.3.4" },
+    { name = "tgcrypto2", marker = "platform_machine != 'aarch64'", specifier = ">=1.3.4" },
 ]
 
 [package.metadata.requires-dev]
