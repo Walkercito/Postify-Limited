@@ -116,22 +116,6 @@ def classify_upload_response(body: str) -> str:
     raise FacebookWebError(f"photo upload failed (no photo id in the response): {_snippet(text)}")
 
 
-def is_blocked_page(url: str, body: str) -> bool:
-    """Whether a fetched page is a checkpoint/restriction wall, not real content.
-
-    A cookie-authenticated GET that Facebook intercepts with a checkpoint or
-    account-restriction interstitial still answers HTTP 200 with a real
-    ``<title>`` — but it is the wall's title, not the group's. Callers use this to
-    discard such a page (and fall back to the public scrape) rather than store the
-    wall's title as if it were the group name. Both the final URL (after redirects)
-    and the page body are checked against the checkpoint and restricted needles.
-    """
-    haystack = f"{url} {_normalize(body)}"
-    return _contains_any(haystack, FB_WEB_CHECKPOINT_NEEDLES) or _contains_any(
-        haystack, FB_WEB_RESTRICTED_NEEDLES
-    )
-
-
 def classify_post_response(body: str, *, group_id: str) -> WebPostOutcome:
     """Confirm a real ``post_id`` or raise the most actionable failure.
 

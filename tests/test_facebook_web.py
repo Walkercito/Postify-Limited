@@ -574,20 +574,41 @@ BLOCKED_PAGE_HTML = (
     f"<html><head><title>{FB_WEB_RESTRICTED_NEEDLES[0]} | Facebook</title></head></html>"
 )
 
+# A genuine logged-in group page is packed with benign markup — including
+# JSON-escaped \/checkpoint\/ links in its scripts. is_blocked_page must ignore
+# the body entirely (keying only off the final URL + <title>), so this real page
+# at the group URL is never mistaken for a wall.
+REAL_PAGE_WITH_CHECKPOINT_MARKUP = (
+    "<!DOCTYPE html><html><head>"
+    "<title>Revolico Aguada de Pasajeros</title></head><body>"
+    '<script>{"uri":"https:\\/\\/web.facebook.com\\/checkpoint\\/?next=foo"}</script>'
+    "</body></html>"
+)
+
 
 def test_is_blocked_page_detects_checkpoint_in_url() -> None:
     # A checkpoint interstitial redirects to a /checkpoint/ URL — caught via the URL.
     assert is_blocked_page("https://web.facebook.com/checkpoint/12345/", "<title>Facebook</title>")
 
 
-def test_is_blocked_page_detects_restriction_in_body() -> None:
-    # An account-restriction wall keeps the group URL but its body carries the needle.
+def test_is_blocked_page_detects_restriction_in_title() -> None:
+    # An account-restriction wall keeps the group URL but its <title> is the wall's,
+    # carrying the restricted needle — caught via the title, not a body scan.
     assert is_blocked_page("https://web.facebook.com/groups/778899/", BLOCKED_PAGE_HTML)
 
 
 def test_is_blocked_page_false_for_a_real_group_page() -> None:
     # A genuine logged-in group page is not a wall, so the title may be lifted.
     assert not is_blocked_page("https://web.facebook.com/groups/778899/", GROUP_PAGE_HTML)
+
+
+def test_is_blocked_page_false_when_body_has_escaped_checkpoint_markup() -> None:
+    # Regression: a real group page embeds escaped \/checkpoint\/ links throughout
+    # its scripts. Un-escaping and scanning the body would flag every real page as a
+    # checkpoint wall; keying only off the final URL + <title> must not.
+    assert not is_blocked_page(
+        "https://web.facebook.com/groups/778899/", REAL_PAGE_WITH_CHECKPOINT_MARKUP
+    )
 
 
 async def test_fetch_group_name_none_on_blocked_page(

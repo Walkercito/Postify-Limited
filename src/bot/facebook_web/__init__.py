@@ -10,14 +10,13 @@ from __future__ import annotations
 
 from bot.facebook_web.client import FacebookWeb
 from bot.facebook_web.cookies import decode_cookies, encode_cookies
-from bot.facebook_web.group_page import extract_group_name
+from bot.facebook_web.group_page import extract_group_name, is_blocked_page
 from bot.facebook_web.params import SessionParams, scrape_session_params
 from bot.facebook_web.response import (
     WebPostOutcome,
     classify_post_response,
     classify_upload_response,
     extract_photo_id,
-    is_blocked_page,
 )
 from bot.facebook_web.variables import build_group_post_variables
 

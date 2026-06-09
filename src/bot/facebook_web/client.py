@@ -59,13 +59,12 @@ from bot.core.exceptions import (
     FacebookWebRateLimitedError,
     FacebookWebSessionExpiredError,
 )
-from bot.facebook_web.group_page import extract_group_name
+from bot.facebook_web.group_page import extract_group_name, is_blocked_page
 from bot.facebook_web.params import SessionParams, scrape_session_params
 from bot.facebook_web.response import (
     WebPostOutcome,
     classify_post_response,
     classify_upload_response,
-    is_blocked_page,
 )
 from bot.facebook_web.variables import build_group_post_variables
 
