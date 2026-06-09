@@ -1,12 +1,14 @@
 """Groups feature: each user curates a personal list of Facebook groups.
 
-Three entry points:
+Four entry points:
 
 * the *Groups* screen → *Añadir* starts a short conversation (the user's next
   message is read as a link);
+* *Lista* renders every saved group through the same paginated result rows the
+  search uses — each a link to the group plus a quick 🗑 delete;
 * *Buscar* starts a fuzzy search (the next message is the search term), which
-  renders ranked, paginated result rows — each a link to the group plus a quick
-  🗑 delete — instead of dumping the whole list as text; and
+  renders ranked, paginated result rows instead of dumping the whole list as
+  text; and
 * an always-on shortcut — pasting a group link at any time (when no other step
   is in progress) saves it, or offers to delete it if it's already saved.
 
@@ -14,8 +16,10 @@ Two link forms are accepted (:mod:`bot.facebook_url`): a direct
 ``facebook.com/groups/<id>`` link (numeric id or vanity slug, used as-is) and a
 ``facebook.com/share/g/<token>`` share link, whose opaque token is resolved to
 the canonical numeric id by opening it (that fetch also yields the name). On a
-new save we best-effort fetch the group's public name (unauthenticated, via the
-vendored ``fb_unofficial`` engine) and store it. The client renders HTML by
+new save we best-effort resolve the group's name — preferring the owner's
+authenticated cookie session over the public scrape — and store it. Every
+network round-trip happens *outside* the short DB transactions, so a slow
+Facebook response can't hold SQLite's write lock. The client renders HTML by
 default, so stored ids/names are echoed back inside ``<code>``/``<b>`` and
 ``html.escape``d at the interpolation site so user-derived text can't break the
 markup.
@@ -33,14 +37,18 @@ from bot.callbacks import GROUP_DECISION_PATTERN, parse_group_decision
 from bot.constants import (
     GROUP_PREVIEW_TIMEOUT_SEC,
     GROUP_SEARCH_PAGE_SIZE,
+    GROUP_SEARCH_SCAN_LIMIT,
     ConversationState,
     GroupAction,
     HandlerGroup,
     LogEvent,
     MenuAction,
+    NameSource,
 )
+from bot.core.exceptions import FacebookWebError
 from bot.core.logging import get_logger
 from bot.facebook_url import extract_group_id, extract_group_share_token, share_group_url
+from bot.facebook_web import FacebookWeb, decode_cookies
 from bot.group_search import GroupHit
 from bot.handlers.base import Router
 from bot.handlers.edits import edit_text
@@ -52,10 +60,13 @@ from bot.keyboards import (
     group_search_results_menu,
     groups_menu,
 )
+from bot.services.facebook_account_service import FacebookAccountService
 from bot.services.group_service import GroupService
 from fb_unofficial import fetch_group_preview
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
     from bot.core.client import Bot
@@ -77,7 +88,9 @@ GROUP_SEARCH_HEADER = (
     "🔎 Resultados para «<b>{query}</b>» — página {page}/{total_pages} ({total} en total):"
 )
 GROUP_SEARCH_NO_RESULTS = "🤷 No encontré grupos parecidos a «<b>{query}</b>»."
-GROUP_SEARCH_EXPIRED = "⌛ Esa búsqueda ya expiró. Abre <b>Grupos</b> y busca de nuevo."
+GROUP_LIST_HEADER = "📋 <b>Tus grupos</b> — página {page}/{total_pages} ({total} en total):"
+GROUP_LIST_EMPTY = "📭 No tienes grupos guardados todavía."
+GROUP_VIEW_EXPIRED = "⌛ Esa vista ya expiró. Abre <b>Grupos</b> e inténtalo de nuevo."
 INVALID_LINK_MESSAGE = "🤔 Eso no parece el enlace de un grupo de Facebook."
 SHARE_LINK_UNRESOLVED = (
     "😕 No pude abrir ese enlace para compartir. "
@@ -99,6 +112,7 @@ class GroupsRouter(Router):
         callbacks = {
             MenuAction.GROUPS: self._on_groups,
             GroupAction.ADD: self._on_add,
+            GroupAction.LIST: self._on_list,
             GroupAction.SEARCH: self._on_search,
         }
         for action, handler in callbacks.items():
@@ -137,6 +151,25 @@ class GroupsRouter(Router):
         await _begin_conversation(
             client, callback_query, ConversationState.ADD_GROUP, GROUP_ADD_PROMPT
         )
+
+    @staticmethod
+    @observed
+    @tracks_activity
+    async def _on_list(client: Bot, callback_query: CallbackQuery) -> None:
+        """Show every saved group through the same paginated rows the search uses."""
+        owner = await guard_owner(client, callback_query)
+        if owner is None:
+            return
+        async with client.database.session() as session:
+            groups = await GroupService(session).list_for_user(
+                owner.id, limit=GROUP_SEARCH_SCAN_LIMIT
+            )
+        hits = _to_hits(groups)
+        log.info(LogEvent.GROUP_LISTED, results=len(hits))
+        search = client.group_searches.put(owner.telegram_id, None, hits)
+        text, markup = _render_search(search)
+        await edit_text(callback_query, text, reply_markup=markup)
+        await callback_query.answer()
 
     @staticmethod
     @observed
@@ -185,7 +218,9 @@ class GroupsRouter(Router):
             owner = await allowed_owner(session, user.id)
             if owner is None:
                 return
-            await _handle_add_request(message, GroupService(session), owner.id, direct, token)
+            account = await FacebookAccountService(session).get_for_user(owner.id)
+        cookies = decode_cookies(account.session_cookies) if account is not None else None
+        await _handle_add_request(client, message, owner.id, cookies, direct, token)
 
 
 async def _begin_conversation(
@@ -210,9 +245,7 @@ async def _dispatch_search(client: Bot, message: Message, telegram_id: int, quer
         if owner is None:
             return
         results = await GroupService(session).search(owner.id, query)
-    hits = [
-        GroupHit(id=group.id, facebook_id=group.facebook_id, name=group.name) for group in results
-    ]
+    hits = _to_hits(results)
     log.info(LogEvent.GROUP_SEARCHED, query=query, results=len(hits))
     search = client.group_searches.put(owner.telegram_id, query, hits)
     text, markup = _render_search(search)
@@ -226,7 +259,7 @@ async def _handle_page(client: Bot, callback_query: CallbackQuery, page: int) ->
         return
     search = client.group_searches.get(owner.telegram_id)
     if search is None:
-        await edit_text(callback_query, GROUP_SEARCH_EXPIRED)
+        await edit_text(callback_query, GROUP_VIEW_EXPIRED)
         await callback_query.answer()
         return
     search.go_to(page)
@@ -242,7 +275,7 @@ async def _handle_quick_delete(client: Bot, callback_query: CallbackQuery, group
         return
     search = client.group_searches.get(owner.telegram_id)
     if search is None:
-        await edit_text(callback_query, GROUP_SEARCH_EXPIRED)
+        await edit_text(callback_query, GROUP_VIEW_EXPIRED)
         await callback_query.answer()
         return
     async with client.database.session() as session:
@@ -282,28 +315,44 @@ async def _handle_cancel_delete(callback_query: CallbackQuery) -> None:
     await callback_query.answer()
 
 
-def _render_search(search: GroupSearch) -> tuple[str, InlineKeyboardMarkup]:
-    """Render a search's current page to ``(text, keyboard)``.
+def _to_hits(groups: Sequence[Group]) -> list[GroupHit]:
+    """Project ORM groups to the lightweight hits the result store keeps."""
+    return [
+        GroupHit(id=group.id, facebook_id=group.facebook_id, name=group.name) for group in groups
+    ]
 
-    An exhausted result set (e.g. after deleting the last match) falls back to
-    the no-results message with a plain *Volver* keyboard.
+
+def _render_search(search: GroupSearch) -> tuple[str, InlineKeyboardMarkup]:
+    """Render a search's (or the *Lista* view's) current page to ``(text, keyboard)``.
+
+    A ``query`` of ``None`` is the full-list view. An exhausted result set
+    (e.g. after deleting the last match) falls back to the mode's empty message
+    with a plain *Volver* keyboard.
     """
     if not search.hits:
+        if search.query is None:
+            return GROUP_LIST_EMPTY, back_to_menu()
         return GROUP_SEARCH_NO_RESULTS.format(query=html.escape(search.query)), back_to_menu()
     window = search.window(GROUP_SEARCH_PAGE_SIZE)
-    text = GROUP_SEARCH_HEADER.format(
-        query=html.escape(search.query),
-        page=window.page + 1,
-        total_pages=window.total_pages,
-        total=window.total,
-    )
+    if search.query is None:
+        text = GROUP_LIST_HEADER.format(
+            page=window.page + 1, total_pages=window.total_pages, total=window.total
+        )
+    else:
+        text = GROUP_SEARCH_HEADER.format(
+            query=html.escape(search.query),
+            page=window.page + 1,
+            total_pages=window.total_pages,
+            total=window.total,
+        )
     return text, group_search_results_menu(window)
 
 
 async def _handle_add_request(
+    client: Bot,
     message: Message,
-    service: GroupService,
     owner_id: int,
+    cookies: dict[str, str] | None,
     direct: str | None,
     token: str | None,
 ) -> None:
@@ -311,21 +360,35 @@ async def _handle_add_request(
 
     Resolves the link to a canonical id first. A share link's resolve already
     yields the public name, so it's reused instead of fetching it twice; a
-    direct link still fetches the name lazily after the save.
+    direct link resolves the name after the duplicate check — preferring the
+    owner's authenticated session (*cookies*) over the public scrape. Every
+    network round-trip runs outside the short transactions (duplicate read,
+    then insert), never inside one, so a slow Facebook response can't hold
+    SQLite's write lock against other updates.
     """
     resolved = await _resolve_reference(direct, token)
     if resolved is None:
         await message.reply_text(SHARE_LINK_UNRESOLVED if token else INVALID_LINK_MESSAGE)
         return
     group_id, prefetched_name = resolved
-    group, created = await service.add(owner_id, group_id)
-    if not created:
+    async with client.database.session() as session:
+        existing = await GroupService(session).find(owner_id, group_id)
+    if existing is not None:
+        await _offer_delete(message, existing)
+        return
+    if prefetched_name is not None:
+        name, source = prefetched_name, NameSource.PREFETCHED
+    else:
+        name, source = await _resolve_group_name(group_id, cookies)
+    async with client.database.session() as session:
+        service = GroupService(session)
+        group, created = await service.add(owner_id, group_id)
+        if created and name is not None:
+            await service.set_name(group, name)
+    if not created:  # the same link raced us between the two transactions
         await _offer_delete(message, group)
         return
-    name = prefetched_name if prefetched_name is not None else await _resolve_group_name(group_id)
-    if name is not None:
-        await service.set_name(group, name)
-    log.info(LogEvent.GROUP_ADDED, facebook_id=group_id, name=name)
+    log.info(LogEvent.GROUP_ADDED, facebook_id=group_id, name=name, name_source=source)
     escaped_id = html.escape(group_id)
     text = (
         GROUP_ADDED_NAMED_MESSAGE.format(name=html.escape(name), group_id=escaped_id)
@@ -356,10 +419,38 @@ async def _resolve_reference(
     return preview.id, preview.name
 
 
-async def _resolve_group_name(facebook_id: str) -> str | None:
-    """Best-effort public name for a group id, or ``None`` when unavailable."""
+async def _resolve_group_name(
+    facebook_id: str, cookies: dict[str, str] | None
+) -> tuple[str | None, NameSource]:
+    """Best-effort group name plus the path that produced it.
+
+    Tries the owner's authenticated cookie session first — Facebook no longer
+    serves group ``og`` tags to logged-out fetches, so the public scrape comes
+    back nameless — then falls back to that public scrape. Returns
+    ``(None, UNRESOLVED)`` when neither yields a name.
+    """
+    if cookies:
+        name = await _fetch_authenticated_name(facebook_id, cookies)
+        if name is not None:
+            return name, NameSource.AUTHENTICATED
     preview = await _fetch_preview(facebook_id)
-    return preview.name if preview is not None else None
+    if preview is not None and preview.name is not None:
+        return preview.name, NameSource.UNAUTHENTICATED
+    return None, NameSource.UNRESOLVED
+
+
+async def _fetch_authenticated_name(facebook_id: str, cookies: dict[str, str]) -> str | None:
+    """The group's name via the owner's logged-in cookie session, or ``None``.
+
+    Failures (expired/blocked session, transport, no usable title) degrade to
+    ``None`` so resolution falls back to the public scrape — adding a group never
+    depends on Facebook honoring the cookies.
+    """
+    try:
+        async with FacebookWeb(cookies) as web:
+            return await web.fetch_group_name(facebook_id)
+    except (FacebookWebError, httpx.HTTPError):
+        return None
 
 
 async def _fetch_preview(url_or_id: str) -> GroupPreview | None:

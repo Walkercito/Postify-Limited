@@ -11,6 +11,7 @@ from bot.constants import (
     POST_BATCH_COOLDOWN_SEC,
     POST_BATCH_SIZE,
     POST_PACE_JITTER_SEC,
+    POST_RUN_MAX_CONSECUTIVE_FAILURES,
     PostFailure,
 )
 from bot.core.exceptions import (
@@ -268,6 +269,34 @@ async def test_expired_session_is_categorized() -> None:
     assert results[0].failure is PostFailure.SESSION_EXPIRED
     # The raw engine reason is preserved (for the admin), not shown to the user.
     assert SESSION_EXPIRED_MESSAGE in (results[0].error or "")
+
+
+async def test_consecutive_failures_trip_the_breaker() -> None:
+    streak = [GROUP_FAIL] * POST_RUN_MAX_CONSECUTIVE_FAILURES
+    results = await _collect(
+        PostService(session_cookies=COOKIES),
+        facebook_ids=[*streak, GROUP_OK, GROUP_OK_2],
+    )
+
+    # Only the failing streak was actually attempted; the rest were skipped.
+    assert len(_FakeFacebookWeb.instances[-1].calls) == POST_RUN_MAX_CONSECUTIVE_FAILURES
+    assert [result.attempted for result in results] == [True] * len(streak) + [False, False]
+    assert post_service.POST_SKIPPED_CONSECUTIVE_FAILURES in (results[-1].error or "")
+    assert results[-1].failure is PostFailure.STOPPED
+
+
+async def test_success_resets_the_failure_streak() -> None:
+    # A success right before the threshold resets the streak, so the breaker
+    # never trips and every group is attempted.
+    near_streak = [GROUP_FAIL] * (POST_RUN_MAX_CONSECUTIVE_FAILURES - 1)
+    ids = [*near_streak, GROUP_OK, *near_streak, GROUP_OK_2]
+
+    results = await _collect(PostService(session_cookies=COOKIES), facebook_ids=ids)
+
+    assert len(_FakeFacebookWeb.instances[-1].calls) == len(ids)
+    assert all(result.attempted for result in results)
+    assert results[len(near_streak)].ok is True
+    assert results[-1].ok is True
 
 
 async def test_cancel_before_run_marks_all_groups_cancelled() -> None:

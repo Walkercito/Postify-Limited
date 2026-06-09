@@ -28,6 +28,8 @@ from bot.constants import (
     FB_WEB_ORIGIN,
     FB_WEB_PENDING_POSTS_MARKER,
     FB_WEB_PHOTO_UPLOAD_URL,
+    FB_WEB_RESTRICTED_NEEDLES,
+    FB_WEB_UPLOAD_ERROR_SNIPPET_MAX_LENGTH,
 )
 from bot.core.exceptions import (
     FacebookWebCheckpointError,
@@ -39,9 +41,12 @@ from bot.facebook_web import (
     FacebookWeb,
     build_group_post_variables,
     classify_post_response,
+    classify_upload_response,
     decode_cookies,
     encode_cookies,
+    extract_group_name,
     extract_photo_id,
+    is_blocked_page,
     scrape_session_params,
 )
 
@@ -216,6 +221,32 @@ def test_extract_photo_id_reads_camel_and_snake_keys() -> None:
     assert extract_photo_id(f'{{"photoID":"{PHOTO_ID}"}}') == PHOTO_ID
     assert extract_photo_id(f'{{"photo_id":"{PHOTO_ID}"}}') == PHOTO_ID
     assert extract_photo_id('{"nothing":"here"}') is None
+
+
+def test_classify_upload_returns_photo_id() -> None:
+    assert classify_upload_response(f'{{"photoID":"{PHOTO_ID}"}}') == PHOTO_ID
+
+
+def test_classify_upload_rate_limit_needle_raises() -> None:
+    with pytest.raises(FacebookWebRateLimitedError):
+        classify_upload_response('{"error":"We limit how often you can post"}')
+
+
+def test_classify_upload_checkpoint_needle_raises() -> None:
+    with pytest.raises(FacebookWebCheckpointError):
+        classify_upload_response('{"redirect":"/checkpoint/123/"}')
+
+
+def test_classify_upload_unconfirmed_quotes_a_clipped_snippet() -> None:
+    padding = "x" * (FB_WEB_UPLOAD_ERROR_SNIPPET_MAX_LENGTH * 2)
+    body = '{"data":\n  "rejected"}' + padding
+
+    with pytest.raises(FacebookWebError) as excinfo:
+        classify_upload_response(body)
+
+    message = str(excinfo.value)
+    assert '{"data": "rejected"}' in message  # whitespace collapsed into one line
+    assert padding not in message  # the body is clipped, never echoed in full
 
 
 # --------------------------------------------------------------------------- #
@@ -458,6 +489,126 @@ async def test_upload_post_carries_fetch_headers(
     assert upload_req.headers["origin"] == FB_WEB_ORIGIN
     assert upload_req.headers["sec-fetch-mode"] == "cors"
     assert upload_req.headers["x-fb-lsd"] == LSD
+
+
+# --------------------------------------------------------------------------- #
+# Group-name lift from the logged-in group page.                                #
+# --------------------------------------------------------------------------- #
+# A logged-in group page carries the display name in the HTML <title>; the entity
+# escape + locale suffix exercise the unescape and the suffix strip.
+GROUP_PAGE_HTML = "<html><head><title>Aqu&iacute; S&iacute; Compro - Facebook</title></head></html>"
+
+
+def test_extract_group_name_reads_title_strips_suffix() -> None:
+    assert extract_group_name("<title>Rodas Cienfuegos | Facebook</title>") == "Rodas Cienfuegos"
+
+
+def test_extract_group_name_unescapes_entities() -> None:
+    assert extract_group_name(GROUP_PAGE_HTML) == "Aquí Sí Compro"
+
+
+def test_extract_group_name_none_without_title() -> None:
+    assert extract_group_name("<html><body>no title element here</body></html>") is None
+
+
+def test_extract_group_name_none_on_logged_out_placeholder() -> None:
+    # An expired session lands on the login wall, whose title is a bare placeholder;
+    # treating it as "no name" lets the caller fall back to the public scrape.
+    assert extract_group_name("<title>Facebook</title>") is None
+    assert extract_group_name("<title>Log in to Facebook</title>") is None
+
+
+async def test_fetch_group_name_lifts_title_from_group_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The authenticated client GETs the group page with navigation headers and lifts
+    # the name from its <title>; lock the URL (carries the group id) and that header.
+    captured: list[httpx.Request] = []
+    real_client = httpx.AsyncClient
+
+    def factory(**kwargs: Any) -> httpx.AsyncClient:
+        kwargs.pop("proxy", None)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(200, text=GROUP_PAGE_HTML)
+
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+    async with FacebookWeb({"c_user": ACTOR_ID}) as web:
+        name = await web.fetch_group_name(GROUP_ID)
+
+    assert name == "Aquí Sí Compro"
+    request = captured[0]
+    assert request.method == "GET"
+    assert GROUP_ID in str(request.url)
+    assert request.headers["sec-fetch-mode"] == "navigate"
+
+
+async def test_fetch_group_name_error_status_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-2xx on the group page (block / gone) surfaces as a generic web error, so
+    # the caller swallows it and falls back to the public scrape rather than crash.
+    real_client = httpx.AsyncClient
+
+    def factory(**kwargs: Any) -> httpx.AsyncClient:
+        kwargs.pop("proxy", None)
+        return real_client(
+            transport=httpx.MockTransport(lambda _req: httpx.Response(404, text="gone")),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+    async with FacebookWeb({"c_user": ACTOR_ID}) as web:
+        with pytest.raises(FacebookWebError):
+            await web.fetch_group_name(GROUP_ID)
+
+
+# A checkpoint or account-restriction wall answers HTTP 200 with its own <title>;
+# this one carries the restricted needle as the page title (what would be stored).
+BLOCKED_PAGE_HTML = (
+    f"<html><head><title>{FB_WEB_RESTRICTED_NEEDLES[0]} | Facebook</title></head></html>"
+)
+
+
+def test_is_blocked_page_detects_checkpoint_in_url() -> None:
+    # A checkpoint interstitial redirects to a /checkpoint/ URL — caught via the URL.
+    assert is_blocked_page("https://web.facebook.com/checkpoint/12345/", "<title>Facebook</title>")
+
+
+def test_is_blocked_page_detects_restriction_in_body() -> None:
+    # An account-restriction wall keeps the group URL but its body carries the needle.
+    assert is_blocked_page("https://web.facebook.com/groups/778899/", BLOCKED_PAGE_HTML)
+
+
+def test_is_blocked_page_false_for_a_real_group_page() -> None:
+    # A genuine logged-in group page is not a wall, so the title may be lifted.
+    assert not is_blocked_page("https://web.facebook.com/groups/778899/", GROUP_PAGE_HTML)
+
+
+async def test_fetch_group_name_none_on_blocked_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A checkpoint/restriction wall answers 200 with its own <title>; fetch_group_name
+    # must return None (so the caller falls back to the public scrape) instead of
+    # storing the wall's title as the authenticated group name.
+    real_client = httpx.AsyncClient
+
+    def factory(**kwargs: Any) -> httpx.AsyncClient:
+        kwargs.pop("proxy", None)
+        return real_client(
+            transport=httpx.MockTransport(lambda _req: httpx.Response(200, text=BLOCKED_PAGE_HTML)),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+    async with FacebookWeb({"c_user": ACTOR_ID}) as web:
+        assert await web.fetch_group_name(GROUP_ID) is None
 
 
 async def test_home_error_status_raises_generic_not_expired(

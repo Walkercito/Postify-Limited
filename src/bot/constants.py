@@ -37,7 +37,7 @@ class MenuAction(StrEnum):
 class GroupAction(StrEnum):
     """Callback-query data for the Groups screen, search and delete confirmation.
 
-    ``ADD`` / ``SEARCH`` are static screen buttons. The rest carry a target id
+    ``ADD`` / ``LIST`` / ``SEARCH`` are static screen buttons. The rest carry a target id
     (encoded by :func:`bot.callbacks.group_decision`): ``QUICK_DELETE`` removes a
     group straight from a search-result row, ``PAGE`` carries a page *number* for
     paginating those results, and ``CONFIRM_DELETE`` / ``CANCEL_DELETE`` resolve
@@ -45,6 +45,7 @@ class GroupAction(StrEnum):
     """
 
     ADD = "group:add"
+    LIST = "group:list"
     SEARCH = "group:search"
     QUICK_DELETE = "group:quick_delete"
     PAGE = "group:page"
@@ -110,12 +111,15 @@ class PostFailure(StrEnum):
 
     The raw engine error is kept verbatim for the admin report; this category is
     all the *user* sees, rendered as a calm, actionable sentence. ``RATE_LIMITED``
-    also covers the groups skipped after the rate-limit circuit-breaker trips.
+    also covers the groups skipped after the rate-limit circuit-breaker trips;
+    ``STOPPED`` covers the groups skipped after the consecutive-failure breaker
+    halts the run (so the user sees "we stopped", not a misleading "retry soon").
     """
 
     RATE_LIMITED = "rate_limited"
     SESSION_EXPIRED = "session_expired"
     GENERIC = "generic"
+    STOPPED = "stopped"
 
 
 class AccountAction(StrEnum):
@@ -183,6 +187,20 @@ class Outcome(StrEnum):
     ERROR = "error"
 
 
+class NameSource(StrEnum):
+    """Where a saved group's display name came from, attached to ``GROUP_ADDED``.
+
+    Surfaced on the wide event so a name that failed to resolve is queryable
+    (``UNRESOLVED``) instead of a silent ``name=None``, and a successful one is
+    attributed to the path that produced it.
+    """
+
+    PREFETCHED = "prefetched"  # recovered while opening a share link
+    AUTHENTICATED = "authenticated"  # the owner's logged-in cookie session
+    UNAUTHENTICATED = "unauthenticated"  # the public, unauthenticated scrape
+    UNRESOLVED = "unresolved"  # no source produced a name
+
+
 class LogEvent(StrEnum):
     """Canonical structured-log event names (one wide event per occurrence)."""
 
@@ -202,6 +220,7 @@ class LogEvent(StrEnum):
     GROUP_ADDED = "group.added"
     GROUP_REMOVED = "group.removed"
     GROUP_SEARCHED = "group.searched"
+    GROUP_LISTED = "group.listed"
     FB_ACCOUNT_LINKED = "fb_account.linked"
     FB_ACCOUNT_UNLINKED = "fb_account.unlinked"
     POST_PUBLISHED = "post.published"
@@ -226,11 +245,18 @@ class HandlerGroup(IntEnum):
     DEFAULT = 0
 
 
+# How long a writer waits for SQLite's single write lock before failing with
+# "database is locked". The driver default (5s) proved too short when several
+# updates write concurrently; WAL keeps readers unblocked, so waiting is cheap.
+SQLITE_BUSY_TIMEOUT_MS: int = 15000
+
+
 class SQLitePragma(StrEnum):
     """PRAGMA statements applied to every new SQLite connection."""
 
     FOREIGN_KEYS = "PRAGMA foreign_keys=ON"
     JOURNAL_WAL = "PRAGMA journal_mode=WAL"
+    BUSY_TIMEOUT = f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}"
 
 
 # In-memory SQLite database name (per-connection database).
@@ -288,6 +314,14 @@ POST_SKIPPED_RATE_LIMIT: str = "omitido — la cuenta fue limitada por Facebook"
 # Per-group reason recorded for groups not attempted because the user cancelled
 # the run mid-flight. Kept off the admin failure report (it is not a failure).
 POST_CANCELLED_REASON: str = "cancelled by user"
+
+# A publish run stops after this many *attempted* failures in a row: when every
+# write starts failing the cause is account-wide (e.g. Facebook soft-blocking
+# uploads), so pushing on just burns the remaining groups against a dead engine.
+POST_RUN_MAX_CONSECUTIVE_FAILURES: int = 3
+
+# Per-group error recorded for the groups skipped after that breaker trips.
+POST_SKIPPED_CONSECUTIVE_FAILURES: str = "omitido — fallos consecutivos, se detuvo la publicación"
 
 # The live composer truncates the *shown* caption to this many characters (the
 # full text is still what gets posted) so the sticky preview message stays compact.
@@ -415,6 +449,18 @@ FB_WEB_PHOTO_UPLOAD_URL: str = (
     "https://upload.facebook.com/ajax/react_composer/attachments/photo/upload"
 )
 
+# The logged-in group page, GET to resolve a group's display name. Facebook
+# stopped serving group ``og`` tags to logged-out fetches, so the name is read
+# from the authenticated page's HTML ``<title>`` (see facebook_web.group_page).
+FB_WEB_GROUP_PAGE_URL_TEMPLATE: str = "https://web.facebook.com/groups/{group_id}"
+# A trailing locale suffix the ``<title>`` may carry after the group name.
+FB_WEB_TITLE_SUFFIXES: tuple[str, ...] = (" | Facebook", " - Facebook")
+# Titles Facebook serves on the login wall instead of the real group name
+# (casefolded for comparison).
+FB_WEB_TITLE_PLACEHOLDERS: frozenset[str] = frozenset(
+    {"facebook", "log in to facebook", "log into facebook", "log in or sign up to view"}
+)
+
 # Permalink shapes for a created group post (and one awaiting admin approval).
 FB_WEB_GROUP_POST_URL_TEMPLATE: str = "https://www.facebook.com/groups/{group_id}/posts/{post_id}"
 FB_WEB_GROUP_PENDING_URL_TEMPLATE: str = (
@@ -514,6 +560,10 @@ FB_WEB_DUPLICATE_NEEDLES: tuple[str, ...] = (
     "already shared this",
     "already posted",
 )
+
+# An unclassifiable upload failure quotes the response body (whitespace-collapsed)
+# up to this many characters, so the admin report shows *what* Facebook answered.
+FB_WEB_UPLOAD_ERROR_SNIPPET_MAX_LENGTH: int = 160
 
 # Desktop browser User-Agent for the web engine. Comet serves the modern markup
 # (and the session tokens we scrape) to a desktop Chrome string.
@@ -615,6 +665,7 @@ MANAGE_REVOKE_PREFIX: str = "♻️ "
 
 # Groups submenu + delete-confirmation button labels.
 GROUP_BUTTON_ADD: str = "📥 Añadir"
+GROUP_BUTTON_LIST: str = "📋 Lista"
 GROUP_BUTTON_SEARCH: str = "🔍 Buscar"
 GROUP_CONFIRM_DELETE_LABEL: str = "✅ Sí, eliminar"
 GROUP_CANCEL_DELETE_LABEL: str = "✖️ Cancelar"

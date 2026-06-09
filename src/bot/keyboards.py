@@ -38,6 +38,7 @@ from bot.constants import (
     BLUEPRINT_CONFIRM_DELETE_LABEL,
     BLUEPRINT_ROW_PREFIX,
     GROUP_BUTTON_ADD,
+    GROUP_BUTTON_LIST,
     GROUP_BUTTON_NAME_MAX_LENGTH,
     GROUP_BUTTON_SEARCH,
     GROUP_CANCEL_DELETE_LABEL,
@@ -223,16 +224,21 @@ def management_menu(pending: Sequence[User], allowed: Sequence[User]) -> InlineK
 
 
 def groups_menu(*, has_groups: bool) -> InlineKeyboardMarkup:
-    """The Groups screen: *Añadir* always, *Buscar* only when groups exist, Volver.
+    """The Groups screen: *Añadir* always, *Lista*/*Buscar* when groups exist, Volver.
 
-    Searching an empty set would be pointless, so the *Buscar* row is omitted
-    until the user has saved at least one group.
+    Listing or searching an empty set would be pointless, so that row is
+    omitted until the user has saved at least one group.
     """
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(GROUP_BUTTON_ADD, callback_data=GroupAction.ADD)]
     ]
     if has_groups:
-        rows.append([InlineKeyboardButton(GROUP_BUTTON_SEARCH, callback_data=GroupAction.SEARCH)])
+        rows.append(
+            [
+                InlineKeyboardButton(GROUP_BUTTON_LIST, callback_data=GroupAction.LIST),
+                InlineKeyboardButton(GROUP_BUTTON_SEARCH, callback_data=GroupAction.SEARCH),
+            ]
+        )
     rows.append(_back_row())
     return InlineKeyboardMarkup(rows)
 

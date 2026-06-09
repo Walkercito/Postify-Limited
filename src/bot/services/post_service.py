@@ -12,7 +12,9 @@ concurrent burst — paced by the engine's ``pace_seconds`` between writes. The 
 is exposed as an async generator that yields one :class:`GroupPostResult` per
 group *as it resolves*, so the caller can stream live progress. A detected
 rate-limit short-circuits the run (remaining groups reported as skipped rather
-than pushed deeper into the limit); an optional ``cancel_event`` lets the caller
+than pushed deeper into the limit), and so does a streak of consecutive
+failures — when every write starts failing, the cause is account-wide and the
+remaining groups would only burn against it; an optional ``cancel_event`` lets the caller
 stop cooperatively — the in-flight group finishes, the rest are marked cancelled,
 and the inter-group wait is interrupted immediately. Expected Facebook failures
 are captured per group (with a :class:`~bot.constants.PostFailure` category for
@@ -32,6 +34,8 @@ from bot.constants import (
     POST_BATCH_SIZE,
     POST_CANCELLED_REASON,
     POST_PACE_JITTER_SEC,
+    POST_RUN_MAX_CONSECUTIVE_FAILURES,
+    POST_SKIPPED_CONSECUTIVE_FAILURES,
     POST_SKIPPED_RATE_LIMIT,
     PostFailure,
 )
@@ -57,8 +61,9 @@ class GroupPostResult:
     holds the raw engine reason (for the admin) and ``failure`` the category the
     user-facing summary renders into a friendly, actionable line. ``cancelled``
     flags a group the run never reached because the user stopped it; ``attempted``
-    is ``False`` for those and for rate-limit-skipped groups, so the admin report
-    can exclude collateral that was never actually tried.
+    is ``False`` for those and for the groups skipped after a breaker trips (a
+    rate limit or a streak of consecutive failures), so the admin report can
+    exclude collateral that was never actually tried.
     """
 
     facebook_id: str
@@ -81,11 +86,21 @@ class _RunState:
 
     rate_limited: bool = False
     cancelled: bool = False
+    failure_streak: int = 0
+
+    @property
+    def broken(self) -> bool:
+        """Whether the consecutive-failure breaker has tripped."""
+        return self.failure_streak >= POST_RUN_MAX_CONSECUTIVE_FAILURES
 
     @property
     def stopped(self) -> bool:
         """Whether the remaining groups should no longer be attempted."""
-        return self.rate_limited or self.cancelled
+        return self.rate_limited or self.cancelled or self.broken
+
+    def record(self, result: GroupPostResult) -> None:
+        """Advance the failure streak with an attempted result (success resets it)."""
+        self.failure_streak = 0 if result.ok else self.failure_streak + 1
 
 
 @dataclass(slots=True)
@@ -207,7 +222,7 @@ class PostService:
     ) -> GroupPostResult:
         """Resolve the next group, advancing *state*'s terminal-mode latches."""
         if state.stopped:
-            return self._cancelled(facebook_id) if state.cancelled else self._skipped(facebook_id)
+            return self._not_attempted(facebook_id, state)
         delay = _inter_post_delay(index, job.poster.pace_seconds)
         if delay > 0 and await _wait_or_cancel(delay, job.cancel_event):
             state.cancelled = True
@@ -218,6 +233,7 @@ class PostService:
         result, state.rate_limited = await self._post_one(
             job.poster, job.message, job.paths, facebook_id
         )
+        state.record(result)
         return result
 
     def _build_poster(self) -> FacebookWeb | _GraphPoster:
@@ -229,12 +245,25 @@ class PostService:
         raise ValueError("no Facebook credential available")  # guarded in __init__
 
     @staticmethod
-    def _skipped(facebook_id: str) -> GroupPostResult:
+    def _not_attempted(facebook_id: str, state: _RunState) -> GroupPostResult:
+        """The result for a group a stopped run never reached, per the stop cause."""
+        if state.cancelled:
+            return PostService._cancelled(facebook_id)
+        if state.rate_limited:
+            return PostService._skipped(
+                facebook_id, POST_SKIPPED_RATE_LIMIT, PostFailure.RATE_LIMITED
+            )
+        return PostService._skipped(
+            facebook_id, POST_SKIPPED_CONSECUTIVE_FAILURES, PostFailure.STOPPED
+        )
+
+    @staticmethod
+    def _skipped(facebook_id: str, reason: str, failure: PostFailure) -> GroupPostResult:
         return GroupPostResult(
             facebook_id=facebook_id,
             url=None,
-            error=POST_SKIPPED_RATE_LIMIT,
-            failure=PostFailure.RATE_LIMITED,
+            error=reason,
+            failure=failure,
             attempted=False,
         )
 

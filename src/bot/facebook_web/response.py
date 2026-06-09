@@ -23,6 +23,7 @@ from bot.constants import (
     FB_WEB_POST_ID_MIN_DIGITS,
     FB_WEB_RATE_LIMIT_NEEDLES,
     FB_WEB_RESTRICTED_NEEDLES,
+    FB_WEB_UPLOAD_ERROR_SNIPPET_MAX_LENGTH,
 )
 from bot.core.exceptions import (
     FacebookWebCheckpointError,
@@ -67,6 +68,27 @@ def _first_post_id(text: str) -> str | None:
     return None
 
 
+def _raise_for_blocking_needles(text: str) -> None:
+    """Raise the account-level failure if *text* carries a known needle.
+
+    These two conditions end the whole run, not just one request: a rate limit
+    needs a back-off, a checkpoint needs the admin to re-capture the session.
+    """
+    if _contains_any(text, FB_WEB_RATE_LIMIT_NEEDLES):
+        raise FacebookWebRateLimitedError(
+            "Facebook is rate-limiting posts from this account — try again later"
+        )
+    if _contains_any(text, FB_WEB_CHECKPOINT_NEEDLES):
+        raise FacebookWebCheckpointError(
+            "Facebook requires an account checkpoint — clear it in a browser and re-capture"
+        )
+
+
+def _snippet(text: str) -> str:
+    """Collapse whitespace and clip *text* for inclusion in an error message."""
+    return " ".join(text.split())[:FB_WEB_UPLOAD_ERROR_SNIPPET_MAX_LENGTH]
+
+
 def extract_photo_id(body: str) -> str | None:
     """Lift the uploaded photo's id out of an upload response (``None`` if absent)."""
     text = _normalize(body)
@@ -75,6 +97,39 @@ def extract_photo_id(body: str) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+def classify_upload_response(body: str) -> str:
+    """Confirm an uploaded photo's id or raise the most actionable failure.
+
+    The upload endpoint mirrors the post endpoint's habit of answering HTTP 200
+    while refusing the write (Facebook soft-blocks uploads after a burst), so
+    the photo id is the only success signal. With no id, the blocking needles
+    steer the failure toward a back-off or re-capture; otherwise a generic
+    error quotes a snippet of the body so the report shows *what* came back.
+    """
+    photo_id = extract_photo_id(body)
+    if photo_id is not None:
+        return photo_id
+    text = _normalize(body)
+    _raise_for_blocking_needles(text)
+    raise FacebookWebError(f"photo upload failed (no photo id in the response): {_snippet(text)}")
+
+
+def is_blocked_page(url: str, body: str) -> bool:
+    """Whether a fetched page is a checkpoint/restriction wall, not real content.
+
+    A cookie-authenticated GET that Facebook intercepts with a checkpoint or
+    account-restriction interstitial still answers HTTP 200 with a real
+    ``<title>`` — but it is the wall's title, not the group's. Callers use this to
+    discard such a page (and fall back to the public scrape) rather than store the
+    wall's title as if it were the group name. Both the final URL (after redirects)
+    and the page body are checked against the checkpoint and restricted needles.
+    """
+    haystack = f"{url} {_normalize(body)}"
+    return _contains_any(haystack, FB_WEB_CHECKPOINT_NEEDLES) or _contains_any(
+        haystack, FB_WEB_RESTRICTED_NEEDLES
+    )
 
 
 def classify_post_response(body: str, *, group_id: str) -> WebPostOutcome:
@@ -94,14 +149,7 @@ def classify_post_response(body: str, *, group_id: str) -> WebPostOutcome:
         url = template.format(group_id=group_id, post_id=post_id)
         return WebPostOutcome(post_id=post_id, url=url, pending=pending)
 
-    if _contains_any(text, FB_WEB_RATE_LIMIT_NEEDLES):
-        raise FacebookWebRateLimitedError(
-            "Facebook is rate-limiting posts from this account — try again later"
-        )
-    if _contains_any(text, FB_WEB_CHECKPOINT_NEEDLES):
-        raise FacebookWebCheckpointError(
-            "Facebook requires an account checkpoint — clear it in a browser and re-capture"
-        )
+    _raise_for_blocking_needles(text)
     if _contains_any(text, FB_WEB_RESTRICTED_NEEDLES):
         raise FacebookWebError("this account is restricted from posting to groups")
     if _contains_any(text, FB_WEB_DUPLICATE_NEEDLES):

@@ -8,7 +8,8 @@ is process-local and ephemeral (a restart forgets in-flight searches).
 The ranked hits live here (not in callback data) so pagination and quick-delete
 only carry a page number / group id; the heavy list stays server-side. Deleting
 a group from a result row mutates the stored hits in place so the re-render stays
-consistent without re-running the query.
+consistent without re-running the query. The *Lista* view (every saved group,
+no filter) reuses the same store with ``query=None``.
 """
 
 from __future__ import annotations
@@ -47,9 +48,13 @@ class GroupSearchPage:
 
 @dataclass(slots=True)
 class GroupSearch:
-    """A user's current ranked result set and which page they're viewing."""
+    """A user's current result set and which page they're viewing.
 
-    query: str
+    ``query`` is the search term that produced the hits, or ``None`` when the
+    set is the full *Lista* view (no filter applied).
+    """
+
+    query: str | None
     hits: list[GroupHit]
     page: int = 0
 
@@ -76,12 +81,12 @@ class GroupSearch:
 
 
 class GroupSearchStore:
-    """Tracks each user's single in-flight search result set."""
+    """Tracks each user's single in-flight search (or list) result set."""
 
     def __init__(self) -> None:
         self._searches: dict[int, GroupSearch] = {}
 
-    def put(self, user_id: int, query: str, hits: list[GroupHit]) -> GroupSearch:
+    def put(self, user_id: int, query: str | None, hits: list[GroupHit]) -> GroupSearch:
         """Store a fresh result set for *user_id*, replacing any previous one."""
         search = GroupSearch(query=query, hits=hits)
         self._searches[user_id] = search

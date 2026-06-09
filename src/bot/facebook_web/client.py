@@ -37,6 +37,7 @@ from bot.constants import (
     FB_WEB_FIELD_VARIABLES,
     FB_WEB_FRIENDLY_NAME_COMPOSER,
     FB_WEB_GRAPHQL_URL,
+    FB_WEB_GROUP_PAGE_URL_TEMPLATE,
     FB_WEB_HEADER_FB_LSD,
     FB_WEB_HOME_URL,
     FB_WEB_NAVIGATION_HEADERS,
@@ -58,8 +59,14 @@ from bot.core.exceptions import (
     FacebookWebRateLimitedError,
     FacebookWebSessionExpiredError,
 )
+from bot.facebook_web.group_page import extract_group_name
 from bot.facebook_web.params import SessionParams, scrape_session_params
-from bot.facebook_web.response import WebPostOutcome, classify_post_response, extract_photo_id
+from bot.facebook_web.response import (
+    WebPostOutcome,
+    classify_post_response,
+    classify_upload_response,
+    is_blocked_page,
+)
 from bot.facebook_web.variables import build_group_post_variables
 
 
@@ -136,6 +143,30 @@ class FacebookWeb:
                 raise
             fresh = await self._reupload_fresh(image_paths)
             return await self._write_group_post(group_id, message, params, fresh)
+
+    async def fetch_group_name(self, group_id: str) -> str | None:
+        """Best-effort group display name from the logged-in group page, or ``None``.
+
+        Reuses the session's cookie-authenticated client (the same fingerprint
+        that makes Facebook return logged-in markup) to GET the group page and
+        lift the name from its ``<title>``. Unlike a post, this needs no scraped
+        session tokens, so it skips :meth:`_ensure_params`. ``None`` means a login
+        wall, a checkpoint/restriction interstitial, or a placeholder title — the
+        caller falls back to the public scrape.
+
+        A checkpoint or account-restriction wall answers HTTP 200 with its own
+        ``<title>``, so the status check alone would let that wall's title through
+        as the group name. :func:`is_blocked_page` (final URL + body) catches it
+        and returns ``None`` before the title is ever read.
+        """
+        response = await self._require_client().get(
+            FB_WEB_GROUP_PAGE_URL_TEMPLATE.format(group_id=group_id),
+            headers=FB_WEB_NAVIGATION_HEADERS,
+        )
+        self._raise_for_status(response, leg="group page")
+        if is_blocked_page(str(response.url), response.text):
+            return None
+        return extract_group_name(response.text)
 
     async def _write_group_post(
         self, group_id: str, message: str, params: SessionParams, photo_ids: list[str]
@@ -274,7 +305,4 @@ class FacebookWeb:
             FB_WEB_PHOTO_UPLOAD_URL, data=form, files=files, headers=self._fetch_headers(params)
         )
         self._raise_for_status(response, leg="photo upload")
-        photo_id = extract_photo_id(response.text)
-        if photo_id is None:
-            raise FacebookWebError("photo upload failed (no photo id in the response)")
-        return photo_id
+        return classify_upload_response(response.text)

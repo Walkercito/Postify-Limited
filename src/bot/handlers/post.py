@@ -189,6 +189,9 @@ POST_FAIL_REASONS = {
     PostFailure.SESSION_EXPIRED: (
         "La sesión de Facebook caducó. Hay que volver a vincular la cuenta antes de publicar."
     ),
+    PostFailure.STOPPED: (
+        "Se detuvo la publicación tras varios fallos seguidos. No se intentó en este grupo."
+    ),
     PostFailure.GENERIC: POST_FAIL_REASON_DEFAULT,
 }
 

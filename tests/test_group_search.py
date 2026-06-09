@@ -108,3 +108,15 @@ def test_store_put_replaces_previous_search() -> None:
 
     assert store.get(USER_ID) is second
     assert second.query == "second"
+
+
+def test_store_put_accepts_list_view_with_no_query() -> None:
+    # The *Lista* view stores the full result set with query=None (no filter).
+    store = GroupSearchStore()
+    hits = _hits(3)
+
+    search = store.put(USER_ID, None, hits)
+
+    assert store.get(USER_ID) is search
+    assert search.query is None
+    assert search.hits == hits

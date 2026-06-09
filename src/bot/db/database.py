@@ -43,10 +43,10 @@ class Database:
             Path(database).parent.mkdir(parents=True, exist_ok=True)
 
     def _register_sqlite_pragmas(self) -> None:
-        """Enforce foreign keys and enable WAL on every new connection.
+        """Apply every :class:`SQLitePragma` (foreign keys, WAL, busy timeout) on connect.
 
-        The listener must target ``sync_engine`` (the underlying DBAPI engine),
-        not the async wrapper.
+        The listener runs each pragma on every new connection and must target
+        ``sync_engine`` (the underlying DBAPI engine), not the async wrapper.
         """
 
         @event.listens_for(self._engine.sync_engine, "connect")
