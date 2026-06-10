@@ -56,6 +56,7 @@ from bot.callbacks import (
 from bot.constants import (
     BLUEPRINT_NAME_MAX_LENGTH,
     POST_ALBUM_DEBOUNCE_SEC,
+    POST_CIRCADIAN_MIDNIGHT_DISPLAY_HOUR,
     POST_GROUP_LIMIT,
     POST_MAX_PHOTOS,
     POST_PHOTO_FILE_SUFFIX,
@@ -812,7 +813,8 @@ def _gate_message(gate: PostGate, limits: PostLimitsSettings) -> str:
         return POST_GATE_CIRCADIAN.format(
             start_hour=limits.active_start_hour,
             start_minute=limits.active_start_minute,
-            end_hour=limits.active_end_hour,
+            # A midnight end is stored as hour 0; show it as 24:00 to the user.
+            end_hour=limits.active_end_hour or POST_CIRCADIAN_MIDNIGHT_DISPLAY_HOUR,
             end_minute=limits.active_end_minute,
         )
     return POST_GATE_MESSAGES.get(gate, POST_GATE_BLOCKED_DEFAULT)

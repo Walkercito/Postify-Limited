@@ -26,6 +26,8 @@ PREDAWN = datetime(2026, 6, 9, 3, 0, tzinfo=UTC)
 
 def _limits(
     *,
+    active_start_hour: int = 8,
+    active_end_hour: int = 23,
     daily_cap: int = 5,
     window_seconds: int = 3600,
     backoff_base_sec: float = 900.0,
@@ -34,8 +36,8 @@ def _limits(
 ) -> PostLimitsSettings:
     """A guard config in UTC with an 08:00-23:00 window and small, exact numbers."""
     return PostLimitsSettings(
-        active_start_hour=8,
-        active_end_hour=23,
+        active_start_hour=active_start_hour,
+        active_end_hour=active_end_hour,
         timezone="UTC",
         daily_cap=daily_cap,
         window_seconds=window_seconds,
@@ -64,6 +66,22 @@ async def test_circadian_blocks_outside_window(session: AsyncSession) -> None:
 
     assert decision.gate is PostGate.CIRCADIAN
     assert decision.remaining_cap is None  # no run starts, so no budget is offered
+
+
+async def test_active_window_until_midnight(session: AsyncSession) -> None:
+    # active_end_hour=0 encodes midnight (24:00) — the exclusive upper bound. The
+    # [07:00, 24:00) window must allow the whole evening and block only the small
+    # hours; this pins the service's midnight-straddle handling of end hour 0.
+    service = _service(session, _limits(active_start_hour=7, active_end_hour=0))
+
+    async def gate_at(hour: int, minute: int = 0) -> PostGate:
+        now = datetime(2026, 6, 9, hour, minute, tzinfo=UTC)
+        return (await service.evaluate(fb_uid=FB_UID, now=now)).gate
+
+    assert await gate_at(0) is PostGate.CIRCADIAN  # midnight is the closed boundary
+    assert await gate_at(6, 59) is PostGate.CIRCADIAN  # small hours: closed
+    assert await gate_at(7) is PostGate.OK  # window opens at 07:00
+    assert await gate_at(23, 59) is PostGate.OK  # open right up to midnight
 
 
 async def test_recorded_attempts_decrement_remaining(session: AsyncSession) -> None:

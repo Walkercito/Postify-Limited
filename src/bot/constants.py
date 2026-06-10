@@ -650,7 +650,7 @@ FB_WEB_FETCH_HEADERS: dict[str, str] = {
 # Pacing: seconds to wait between consecutive group posts on the web engine, to
 # stay under Facebook's write rate limits (one account, sequential). A detected
 # rate-limit short-circuits the rest of the run.
-FB_WEB_PACE_SECONDS: float = 45.0
+FB_WEB_PACE_SECONDS: float = 22.0
 FB_WEB_TIMEOUT_SEC: float = 30.0
 
 # Anti-detection pacing layered on top of the engine's base ``pace_seconds`` (the
@@ -659,9 +659,10 @@ FB_WEB_TIMEOUT_SEC: float = 30.0
 # metronome; and after every POST_BATCH_SIZE posts an extra POST_BATCH_COOLDOWN_SEC
 # rest mimics a human pausing between bursts. Engines that do not pace (base pace
 # of 0 — the Graph adapter and the test fakes) skip all of this and run immediately.
-POST_PACE_JITTER_SEC: float = 30.0
+# Tuned for ~38s/group average (≈1h for 100 groups), trading some margin for speed.
+POST_PACE_JITTER_SEC: float = 15.0
 POST_BATCH_SIZE: int = 10
-POST_BATCH_COOLDOWN_SEC: float = 180.0
+POST_BATCH_COOLDOWN_SEC: float = 90.0
 
 # --------------------------------------------------------------------------- #
 # Per-account publish guards (behaviour-only anti-automation hardening).        #
@@ -676,12 +677,17 @@ POST_BATCH_COOLDOWN_SEC: float = 180.0
 # Circadian gating: a run is refused outside this local active-hours window, so
 # the account never posts overnight (a human-implausible signal). The window is a
 # time-of-day range ``[start, end)`` evaluated in POST_CIRCADIAN_TIMEZONE; the
-# default keeps posting to daytime/evening Cuba hours (08:00 through 22:59 local).
-POST_CIRCADIAN_ACTIVE_START_HOUR: int = 8
+# default keeps posting to Cuba waking hours (07:00 through 23:59 local). An end
+# hour of 0 means midnight (24:00) — the exclusive upper bound — since Python's
+# ``time`` rejects hour 24; the service's midnight-straddle branch handles it.
+POST_CIRCADIAN_ACTIVE_START_HOUR: int = 7
 POST_CIRCADIAN_ACTIVE_START_MINUTE: int = 0
-POST_CIRCADIAN_ACTIVE_END_HOUR: int = 23
+POST_CIRCADIAN_ACTIVE_END_HOUR: int = 0
 POST_CIRCADIAN_ACTIVE_END_MINUTE: int = 0
 POST_CIRCADIAN_TIMEZONE: str = "America/Havana"
+# Display only: a window ending at midnight is stored as hour 0 but shown to the
+# user as 24:00 (reads as "until midnight", not "closes at the day's start").
+POST_CIRCADIAN_MIDNIGHT_DISPLAY_HOUR: int = 24
 
 # Daily cap: at most this many *attempted* posts per Facebook account per rolling
 # window. A run already at the cap is refused outright; a run that would cross it
