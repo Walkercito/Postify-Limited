@@ -57,6 +57,7 @@ async def _collect(
     image_paths: Sequence[str] = ("a.jpg",),
     facebook_ids: Sequence[str],
     cancel_event: asyncio.Event | None = None,
+    remaining_cap: int | None = None,
 ) -> list[GroupPostResult]:
     """Drain the publish async generator into a list (one result per group)."""
     return [
@@ -66,6 +67,7 @@ async def _collect(
             image_paths=list(image_paths),
             facebook_ids=facebook_ids,
             cancel_event=cancel_event,
+            remaining_cap=remaining_cap,
         )
     ]
 
@@ -297,6 +299,23 @@ async def test_success_resets_the_failure_streak() -> None:
     assert all(result.attempted for result in results)
     assert results[len(near_streak)].ok is True
     assert results[-1].ok is True
+
+
+async def test_daily_cap_skips_groups_past_the_budget() -> None:
+    # remaining_cap bounds the run: only the first two groups are attempted, the
+    # rest are skipped as daily-cap collateral (never pushed against the cap).
+    results = await _collect(
+        PostService(session_cookies=COOKIES),
+        facebook_ids=[GROUP_OK, GROUP_OK_2, GROUP_OK, GROUP_OK_2],
+        remaining_cap=2,
+    )
+
+    assert [result.attempted for result in results] == [True, True, False, False]
+    assert [result.ok for result in results[:2]] == [True, True]
+    # Only the two within-budget groups actually hit the engine.
+    assert len(_FakeFacebookWeb.instances[-1].calls) == 2
+    assert post_service.POST_SKIPPED_DAILY_CAP in (results[-1].error or "")
+    assert results[-1].failure is PostFailure.DAILY_CAP_REACHED
 
 
 async def test_cancel_before_run_marks_all_groups_cancelled() -> None:

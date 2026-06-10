@@ -36,6 +36,7 @@ from bot.constants import (
     POST_PACE_JITTER_SEC,
     POST_RUN_MAX_CONSECUTIVE_FAILURES,
     POST_SKIPPED_CONSECUTIVE_FAILURES,
+    POST_SKIPPED_DAILY_CAP,
     POST_SKIPPED_RATE_LIMIT,
     PostFailure,
 )
@@ -86,6 +87,7 @@ class _RunState:
 
     rate_limited: bool = False
     cancelled: bool = False
+    cap_reached: bool = False
     failure_streak: int = 0
 
     @property
@@ -96,7 +98,7 @@ class _RunState:
     @property
     def stopped(self) -> bool:
         """Whether the remaining groups should no longer be attempted."""
-        return self.rate_limited or self.cancelled or self.broken
+        return self.rate_limited or self.cancelled or self.cap_reached or self.broken
 
     def record(self, result: GroupPostResult) -> None:
         """Advance the failure streak with an attempted result (success resets it)."""
@@ -105,12 +107,18 @@ class _RunState:
 
 @dataclass(slots=True)
 class _PostJob:
-    """The loop-invariant inputs of a run: the engine, content, and cancel hook."""
+    """The loop-invariant inputs of a run: the engine, content, and cancel hook.
+
+    ``remaining_cap`` is the account's rolling daily-cap budget for this run: once
+    that many groups have been reached the cap latches and the rest are skipped.
+    ``None`` means the run is uncapped.
+    """
 
     poster: FacebookWeb | _GraphPoster
     message: str
     paths: list[str]
     cancel_event: asyncio.Event | None
+    remaining_cap: int | None = None
 
 
 def _cancel_requested(cancel_event: asyncio.Event | None) -> bool:
@@ -203,17 +211,26 @@ class PostService:
         image_paths: Sequence[str],
         facebook_ids: Sequence[str],
         cancel_event: asyncio.Event | None = None,
+        remaining_cap: int | None = None,
     ) -> AsyncIterator[GroupPostResult]:
         """Yield one result per id in *facebook_ids*, in order, as each resolves.
 
         Setting *cancel_event* requests a cooperative stop: the in-flight group is
         allowed to finish, the inter-group wait is cut short, and every remaining
-        group is yielded as cancelled.
+        group is yielded as cancelled. Setting *remaining_cap* bounds how many
+        groups the run may attempt (the account's rolling daily-cap budget): once
+        reached, the remaining groups are yielded as skipped.
         """
         paths = list(image_paths)
         state = _RunState()
         async with self._build_poster() as poster:
-            job = _PostJob(poster=poster, message=message, paths=paths, cancel_event=cancel_event)
+            job = _PostJob(
+                poster=poster,
+                message=message,
+                paths=paths,
+                cancel_event=cancel_event,
+                remaining_cap=remaining_cap,
+            )
             for index, facebook_id in enumerate(facebook_ids):
                 yield await self._next_result(job, facebook_id, index, state)
 
@@ -221,6 +238,8 @@ class PostService:
         self, job: _PostJob, facebook_id: str, index: int, state: _RunState
     ) -> GroupPostResult:
         """Resolve the next group, advancing *state*'s terminal-mode latches."""
+        if job.remaining_cap is not None and index >= job.remaining_cap:
+            state.cap_reached = True
         if state.stopped:
             return self._not_attempted(facebook_id, state)
         delay = _inter_post_delay(index, job.poster.pace_seconds)
@@ -252,6 +271,10 @@ class PostService:
         if state.rate_limited:
             return PostService._skipped(
                 facebook_id, POST_SKIPPED_RATE_LIMIT, PostFailure.RATE_LIMITED
+            )
+        if state.cap_reached:
+            return PostService._skipped(
+                facebook_id, POST_SKIPPED_DAILY_CAP, PostFailure.DAILY_CAP_REACHED
             )
         return PostService._skipped(
             facebook_id, POST_SKIPPED_CONSECUTIVE_FAILURES, PostFailure.STOPPED

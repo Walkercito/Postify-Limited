@@ -114,12 +114,32 @@ class PostFailure(StrEnum):
     also covers the groups skipped after the rate-limit circuit-breaker trips;
     ``STOPPED`` covers the groups skipped after the consecutive-failure breaker
     halts the run (so the user sees "we stopped", not a misleading "retry soon").
+    ``DAILY_CAP_REACHED`` covers the tail skipped when the account's rolling daily
+    attempt cap is hit mid-run (the run posts up to the budget, then stops).
     """
 
     RATE_LIMITED = "rate_limited"
     SESSION_EXPIRED = "session_expired"
     GENERIC = "generic"
     STOPPED = "stopped"
+    DAILY_CAP_REACHED = "daily_cap_reached"
+
+
+class PostGate(StrEnum):
+    """Whether an account may start a publish run now, and why not if it may not.
+
+    Decided per run by
+    :class:`~bot.services.account_post_limit_service.AccountPostLimitService`
+    *before* any photo is downloaded or posted. ``OK`` lets the run proceed
+    (possibly capped to a partial set of groups); every other member names the
+    guard that refused it and maps to a friendly, actionable message the handler
+    shows instead of publishing.
+    """
+
+    OK = "ok"  # the run may proceed
+    CIRCADIAN = "circadian"  # outside the configured active-hours window
+    BACKOFF = "backoff"  # cooling down after recent soft-blocks
+    DAILY_CAP = "daily_cap"  # the rolling-24h attempt budget is already spent
 
 
 class AccountAction(StrEnum):
@@ -224,6 +244,9 @@ class LogEvent(StrEnum):
     FB_ACCOUNT_LINKED = "fb_account.linked"
     FB_ACCOUNT_UNLINKED = "fb_account.unlinked"
     POST_PUBLISHED = "post.published"
+    POST_GATE_BLOCKED = "post.gate_blocked"
+    POST_BACKOFF_ESCALATED = "post.backoff_escalated"
+    POST_BACKOFF_CLEARED = "post.backoff_cleared"
     POST_REFLOAT_FAILED = "post.refloat_failed"
     BLUEPRINT_SAVED = "blueprint.saved"
     BLUEPRINT_UPDATED = "blueprint.updated"
@@ -322,6 +345,11 @@ POST_RUN_MAX_CONSECUTIVE_FAILURES: int = 3
 
 # Per-group error recorded for the groups skipped after that breaker trips.
 POST_SKIPPED_CONSECUTIVE_FAILURES: str = "omitido — fallos consecutivos, se detuvo la publicación"
+
+# Per-group reason recorded for the over-cap tail of a run that was allowed to
+# post only part of its groups before the account's rolling daily attempt cap was
+# reached (the budget ran out mid-run; the rest are skipped, not failed).
+POST_SKIPPED_DAILY_CAP: str = "omitido — se alcanzó el límite diario de la cuenta"
 
 # The live composer truncates the *shown* caption to this many characters (the
 # full text is still what gets posted) so the sticky preview message stays compact.
@@ -634,6 +662,42 @@ FB_WEB_TIMEOUT_SEC: float = 30.0
 POST_PACE_JITTER_SEC: float = 30.0
 POST_BATCH_SIZE: int = 10
 POST_BATCH_COOLDOWN_SEC: float = 180.0
+
+# --------------------------------------------------------------------------- #
+# Per-account publish guards (behaviour-only anti-automation hardening).        #
+#                                                                               #
+# Three account-level gates that change only WHEN and HOW MANY posts go out —    #
+# never the content. State persists per account in the ``account_post_limits``  #
+# table (so a cooldown and the daily count survive a restart). Defaults are      #
+# production-sane; override via the ``POST_LIMITS__*`` env prefix. The service    #
+# implementing these is ``bot.services.account_post_limit_service``.            #
+# --------------------------------------------------------------------------- #
+
+# Circadian gating: a run is refused outside this local active-hours window, so
+# the account never posts overnight (a human-implausible signal). The window is a
+# time-of-day range ``[start, end)`` evaluated in POST_CIRCADIAN_TIMEZONE; the
+# default keeps posting to daytime/evening Cuba hours (08:00 through 22:59 local).
+POST_CIRCADIAN_ACTIVE_START_HOUR: int = 8
+POST_CIRCADIAN_ACTIVE_START_MINUTE: int = 0
+POST_CIRCADIAN_ACTIVE_END_HOUR: int = 23
+POST_CIRCADIAN_ACTIVE_END_MINUTE: int = 0
+POST_CIRCADIAN_TIMEZONE: str = "America/Havana"
+
+# Daily cap: at most this many *attempted* posts per Facebook account per rolling
+# window. A run already at the cap is refused outright; a run that would cross it
+# posts up to the remaining budget and skips the rest. POST_WINDOW_SECONDS is the
+# window length, used by the elapsed-since-window-start rollover test (24h).
+POST_DAILY_CAP_ATTEMPTS: int = 200
+POST_WINDOW_SECONDS: int = 86400
+
+# Cross-run back-off: after any run that hits a soft-block (a Facebook rate-limit
+# or an expired session), the account is put on a cooldown before it may start
+# again. The cooldown escalates per consecutive soft-blocked run —
+# ``base * multiplier ** (blocks - 1)``, ceilinged at the cap — and fully resets
+# after one clean run. Stored as an absolute instant, so it survives a restart.
+POST_BACKOFF_BASE_SEC: float = 900.0
+POST_BACKOFF_MULTIPLIER: float = 2.0
+POST_BACKOFF_CAP_SEC: float = 7200.0
 
 # Shared navigation label: return to the main menu from any submenu (its
 # callback_data is ``MenuAction.MAIN``).

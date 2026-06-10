@@ -72,8 +72,10 @@ from bot.constants import (
     MenuAction,
     PostAction,
     PostFailure,
+    PostGate,
 )
 from bot.core.logging import get_logger
+from bot.db.base import utcnow
 from bot.facebook_web import decode_cookies
 from bot.handlers.base import Router
 from bot.handlers.edits import edit_message, edit_text
@@ -87,6 +89,7 @@ from bot.keyboards import (
     post_publish_menu,
     post_result_page_menu,
 )
+from bot.services.account_post_limit_service import AccountPostLimitService, GateDecision
 from bot.services.blueprint_service import BlueprintService
 from bot.services.facebook_account_service import FacebookAccountService
 from bot.services.group_service import GroupService
@@ -99,6 +102,7 @@ if TYPE_CHECKING:
     from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
     from bot.core.client import Bot
+    from bot.core.config import PostLimitsSettings
     from bot.db.models.facebook_account import FacebookAccount
     from bot.db.models.user import User
     from bot.post_drafts import PostDraft
@@ -192,8 +196,36 @@ POST_FAIL_REASONS = {
     PostFailure.STOPPED: (
         "Se detuvo la publicación tras varios fallos seguidos. No se intentó en este grupo."
     ),
+    PostFailure.DAILY_CAP_REACHED: (
+        "Esta cuenta alcanzó su límite diario de publicaciones. No se intentó en este grupo."
+    ),
     PostFailure.GENERIC: POST_FAIL_REASON_DEFAULT,
 }
+
+# A behaviour-only publish guard refused the run before it started — the user sees
+# a calm "not now" with the reason; the content is untouched. CIRCADIAN formats the
+# configured active window so the user knows when to come back.
+POST_GATE_CIRCADIAN = (
+    "🌙 Por ahora las publicaciones están en pausa fuera del horario activo "
+    "({start_hour:02d}:{start_minute:02d} - {end_hour:02d}:{end_minute:02d}). "
+    "Vuelve a intentarlo dentro de ese horario."
+)
+POST_GATE_BACKOFF = (
+    "⏳ Esta cuenta está descansando tras unos bloqueos recientes de Facebook. "
+    "Espera un rato antes de volver a publicar."
+)
+POST_GATE_DAILY_CAP = (
+    "📊 Esta cuenta ya alcanzó su límite de publicaciones por hoy. Vuelve a intentarlo mañana."
+)
+POST_GATE_BLOCKED_DEFAULT = "🚫 No se puede publicar en este momento. Inténtalo más tarde."
+POST_GATE_MESSAGES = {
+    PostGate.BACKOFF: POST_GATE_BACKOFF,
+    PostGate.DAILY_CAP: POST_GATE_DAILY_CAP,
+}
+
+# Per-group failure categories that mark a finished run as soft-blocked, which
+# escalates the account's cross-run cooldown.
+_SOFT_BLOCK_FAILURES = frozenset({PostFailure.RATE_LIMITED, PostFailure.SESSION_EXPIRED})
 
 # Consolidated technical note sent to the admin when groups fail (English, like
 # the rest of the admin error reports — it carries the raw engine reason).
@@ -203,7 +235,12 @@ POST_ADMIN_FAILURE_LINE = "• <b>{name}</b> — {reason}"
 
 @dataclass(slots=True)
 class _PublishPlan:
-    """The resolved inputs of one publish run, addressed at the sticky message."""
+    """The resolved inputs of one publish run, addressed at the sticky message.
+
+    ``remaining_cap`` is the account's rolling daily-cap budget for this run (from
+    the pre-flight gate): the publish loop attempts at most that many groups and
+    skips the rest. ``None`` means uncapped.
+    """
 
     account: FacebookAccount
     facebook_ids: list[str]
@@ -211,6 +248,7 @@ class _PublishPlan:
     chat_id: int
     message_id: int
     user_id: int
+    remaining_cap: int | None = None
 
 
 @dataclass(slots=True)
@@ -711,6 +749,12 @@ async def _run_post(
         client.post_drafts.clear(owner.telegram_id)
         await _end(callback_query, _blocked_reason(location, account, bool(groups)))
         return
+    decision = await _evaluate_gate(client, account)
+    if decision.gate is not PostGate.OK:
+        log.info(LogEvent.POST_GATE_BLOCKED, gate=decision.gate, fb_uid=account.fb_uid)
+        client.post_drafts.clear(owner.telegram_id)
+        await _end(callback_query, _gate_message(decision.gate, client.settings.post_limits))
+        return
     draft.begin_publishing()
     await callback_query.answer()
     chat_id, message_id = location
@@ -721,6 +765,7 @@ async def _run_post(
         chat_id=chat_id,
         message_id=message_id,
         user_id=owner.telegram_id,
+        remaining_cap=decision.remaining_cap,
     )
     results = await _run_publish(client, draft, plan)
     cancelled = bool(draft.cancel_event and draft.cancel_event.is_set())
@@ -730,8 +775,47 @@ async def _run_post(
             client, plan.chat_id, plan.message_id, POST_DOWNLOAD_FAILED, reply_markup=back_to_menu()
         )
         return
+    await _record_run(client, plan, results)
     _log_outcome(results, cancelled=cancelled)
     await _report_failures(client, owner, results, plan.name_by_id)
+
+
+async def _evaluate_gate(client: Bot, account: FacebookAccount) -> GateDecision:
+    """Run the pre-flight publish guards for *account* (read-only, its own session)."""
+    async with client.database.session() as session:
+        service = AccountPostLimitService(session, client.settings.post_limits)
+        return await service.evaluate(fb_uid=account.fb_uid, now=utcnow())
+
+
+async def _record_run(client: Bot, plan: _PublishPlan, results: Sequence[GroupPostResult]) -> None:
+    """Persist the finished run against the account's guards (window + back-off).
+
+    ``attempted`` is the daily-cap budget the run spent (groups it actually tried);
+    a run that hit a rate-limit or an expired session counts as soft-blocked and
+    escalates the account's cooldown.
+    """
+    attempted = sum(1 for result in results if result.attempted)
+    soft_blocked = any(result.failure in _SOFT_BLOCK_FAILURES for result in results)
+    async with client.database.session() as session:
+        service = AccountPostLimitService(session, client.settings.post_limits)
+        await service.record(
+            fb_uid=plan.account.fb_uid,
+            now=utcnow(),
+            attempted=attempted,
+            soft_blocked=soft_blocked,
+        )
+
+
+def _gate_message(gate: PostGate, limits: PostLimitsSettings) -> str:
+    """The calm, actionable line shown to the user when a guard refused the run."""
+    if gate is PostGate.CIRCADIAN:
+        return POST_GATE_CIRCADIAN.format(
+            start_hour=limits.active_start_hour,
+            start_minute=limits.active_start_minute,
+            end_hour=limits.active_end_hour,
+            end_minute=limits.active_end_minute,
+        )
+    return POST_GATE_MESSAGES.get(gate, POST_GATE_BLOCKED_DEFAULT)
 
 
 async def _run_publish(
@@ -758,6 +842,7 @@ async def _stream_publish(
         image_paths=paths,
         facebook_ids=plan.facebook_ids,
         cancel_event=draft.cancel_event,
+        remaining_cap=plan.remaining_cap,
     ):
         results.append(result)
         await renderer.update(results)
